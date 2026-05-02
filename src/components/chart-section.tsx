@@ -1,289 +1,283 @@
-"use client";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 
-import { useEffect, useRef, useState } from "react";
-import { Sparkles, Loader2, ImageIcon, X, RefreshCw, Check, ClipboardCopy } from "lucide-react";
-import toast from "react-hot-toast";
-import { cn } from "@/lib/utils";
+const BRANDDI_DARK: [number, number, number] = [13, 51, 73];
+const BRANDDI_CYAN: [number, number, number] = [0, 188, 212];
+const WHITE: [number, number, number] = [255, 255, 255];
+const LIGHT_BG: [number, number, number] = [245, 248, 252];
+const TEXT_DARK: [number, number, number] = [20, 35, 50];
+const TEXT_GRAY: [number, number, number] = [100, 116, 139];
+const F = "helvetica"; // fonte mais próxima de Inter disponível no jsPDF
 
-export interface AnalysisOptions {
-  exemplo1: string;
-  exemplo2: string;
+export interface TopAgressor { score: number; domain: string; }
+export interface ContencaoItem { domain: string; status: string; }
+export interface StandbyItem { agressor: string; status: string; nextAction: string; }
+
+export interface BbReportData {
+  clientName: string; period: string; periodType: "Semanal" | "Quinzenal"; periodDays: number;
+  metricasIntro: string; identified: number; inactive: number; occurrences: number;
+  notified: number; eliminated: number; notificationsSent: number;
+  agressoresAnalysis: string; newAgressors: number; totalAgressors: number; agressoresChartImage?: string;
+  heatmapAnalysis: string; topAgressores: TopAgressor[]; heatmapChartImage?: string;
+  contencaoItems: ContencaoItem[]; standbyItems: StandbyItem[];
+  aprovacaoText: string; resolvidosText: string;
 }
 
-interface ChartSectionProps {
-  slot: "agressores" | "heatmap";
-  uploadLabel: string;
-  preview: string;
-  analysisText: string;
-  options: AnalysisOptions | null;
-  loading: boolean;
-  /** Se false, o gráfico é desativado e não entra no PPT */
-  enabled?: boolean;
-  onToggle?: () => void;
-  onFile: (file: File) => void;
-  onClear: () => void;
-  onSelectAnalysis: (text: string) => void;
-  onEditAnalysis: (text: string) => void;
-  onRegenerate: () => void;
+function drawChrome(doc: jsPDF, pw: number, ph: number, client: string, period: string, hB64?: string, wB64?: string) {
+  doc.setFillColor(...BRANDDI_DARK);
+  doc.rect(0, 0, pw, 18, "F");
+  if (hB64) {
+    try { doc.addImage(hB64, "PNG", pw - 38, 2, 34, 14, undefined, "FAST"); } catch (_) { /**/ }
+  } else {
+    doc.setFont(F, "bold"); doc.setFontSize(9); doc.setTextColor(...WHITE);
+    doc.text("Branddi Monitor", pw - 8, 11, { align: "right" });
+  }
+  doc.setFont(F, "bold"); doc.setFontSize(10); doc.setTextColor(...WHITE);
+  doc.text(`Relatório ${period} de Brand Bidding`, 8, 8);
+  doc.setFont(F, "normal"); doc.setFontSize(8); doc.setTextColor(...BRANDDI_CYAN);
+  doc.text(client, 8, 14);
+  if (wB64) {
+    try {
+      doc.saveGraphicsState();
+      // @ts-ignore
+      doc.setGState(new doc.GState({ opacity: 0.07 }));
+      doc.addImage(wB64, "PNG", pw - 50, ph - 50, 44, 44, undefined, "FAST");
+      doc.restoreGraphicsState();
+    } catch (_) { /**/ }
+  }
 }
 
-export function ChartSection({
-  slot,
-  uploadLabel,
-  preview,
-  analysisText,
-  options,
-  loading,
-  enabled = true,
-  onToggle,
-  onFile,
-  onClear,
-  onSelectAnalysis,
-  onEditAnalysis,
-  onRegenerate,
-}: ChartSectionProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const dropRef = useRef<HTMLDivElement>(null);
-  const [isFocused, setIsFocused] = useState(false);
+function sectionTitle(doc: jsPDF, title: string, y: number, pw: number): number {
+  doc.setFillColor(...BRANDDI_DARK);
+  doc.roundedRect(8, y, pw - 16, 8, 1, 1, "F");
+  doc.setFont(F, "bold"); doc.setFontSize(9); doc.setTextColor(...WHITE);
+  doc.text(title, 13, y + 5.5);
+  return y + 12;
+}
 
-  function handleFile(file: File | null | undefined) {
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      toast.error("Apenas imagens (PNG, JPG, etc.)");
-      return;
-    }
-    onFile(file);
+function sectionDesc(doc: jsPDF, text: string, y: number, pw: number): number {
+  doc.setFont(F, "italic"); doc.setFontSize(7.5); doc.setTextColor(...TEXT_GRAY);
+  const lines = doc.splitTextToSize(text, pw - 24);
+  doc.text(lines, 12, y);
+  return y + lines.length * 4 + 2;
+}
+
+function analysisBlock(doc: jsPDF, text: string, y: number, pw: number): number {
+  if (!text) return y;
+  const lines = doc.splitTextToSize(text, pw - 30);
+  const bH = lines.length * 4.5 + 7;
+  doc.setFillColor(...LIGHT_BG);
+  doc.roundedRect(10, y, pw - 20, bH, 1.5, 1.5, "F");
+  doc.setFillColor(...BRANDDI_CYAN);
+  doc.rect(10, y, 2.5, bH, "F");
+  doc.setFont(F, "normal"); doc.setFontSize(8); doc.setTextColor(...TEXT_DARK);
+  doc.text(lines, 16, y + 5);
+  return y + bH + 4;
+}
+
+/**
+ * Insere gráfico CENTRALIZADO com borda ciano e legenda em fonte Inter.
+ * Resolve o problema de gráficos fora de centro relatado pela usuária.
+ */
+function chartImage(doc: jsPDF, base64: string | undefined, y: number, pw: number, maxH = 62): number {
+  if (!base64) return y;
+
+  const MX = 8;          // margem horizontal
+  const PAD = 3;         // padding interno ao container
+
+  const containerX = MX;
+  const containerW = pw - MX * 2;
+  const imgW = containerW - PAD * 2;
+  const imgH = Math.min(maxH, Math.round(imgW * 0.44)); // proporção 16:7
+  const containerH = imgH + PAD * 2;
+
+  // Borda ciano
+  doc.setDrawColor(...BRANDDI_CYAN);
+  doc.setLineWidth(0.4);
+  doc.roundedRect(containerX, y, containerW, containerH, 2, 2, "S");
+
+  // ── Centralização horizontal exata ──
+  // imgX garante que a imagem fica perfeitamente centrada dentro do container
+  const imgX = containerX + (containerW - imgW) / 2;
+  const imgY = y + PAD;
+
+  try {
+    doc.addImage(base64, "PNG", imgX, imgY, imgW, imgH, undefined, "FAST");
+  } catch (_) {
+    doc.setFillColor(230, 235, 242);
+    doc.rect(imgX, imgY, imgW, imgH, "F");
+    doc.setFont(F, "italic"); doc.setFontSize(8); doc.setTextColor(...TEXT_GRAY);
+    doc.text("[Gráfico não disponível]", imgX + imgW / 2, imgY + imgH / 2, { align: "center" });
   }
 
-  useEffect(() => {
-    if (!isFocused) return;
-    function onPaste(e: ClipboardEvent) {
-      const items = e.clipboardData?.items;
-      if (!items) return;
-      for (const item of items) {
-        if (item.type.startsWith("image/")) {
-          const file = item.getAsFile();
-          if (file) {
-            e.preventDefault();
-            handleFile(file);
-            toast.success("Imagem colada!");
-            return;
-          }
-        }
-      }
+  // Legenda centralizada (simula Inter com Helvetica — padrão mais próximo)
+  doc.setFont(F, "italic"); doc.setFontSize(6.5); doc.setTextColor(...TEXT_GRAY);
+  doc.text("Fonte: Branddi Monitor", pw / 2, y + containerH + 3.5, { align: "center" });
+
+  return y + containerH + 7;
+}
+
+function checkPage(doc: jsPDF, y: number, need: number, ph: number, pw: number,
+  client: string, period: string, hB64?: string, wB64?: string): number {
+  if (y + need > ph - 12) {
+    doc.addPage();
+    drawChrome(doc, pw, ph, client, period, hB64, wB64);
+    return 24;
+  }
+  return y;
+}
+
+export async function generateBbPdf(data: BbReportData): Promise<void> {
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const PW = doc.internal.pageSize.getWidth();
+  const PH = doc.internal.pageSize.getHeight();
+
+  let hB64: string | undefined;
+  let wB64: string | undefined;
+  try {
+    const [hRes, wRes] = await Promise.all([fetch("/branding/header-bg.png"), fetch("/branding/logo-watermark.png")]);
+    const toB64 = async (res: Response) => {
+      if (!res.ok) return undefined;
+      const blob = await res.blob();
+      return new Promise<string>((res) => { const r = new FileReader(); r.onload = () => res(r.result as string); r.readAsDataURL(blob); });
+    };
+    hB64 = await toB64(hRes);
+    wB64 = await toB64(wRes);
+  } catch (_) { /**/ }
+
+  // Página 1
+  drawChrome(doc, PW, PH, data.clientName, data.period, hB64, wB64);
+  let y = 36;
+
+  doc.setFont(F, "bold"); doc.setFontSize(18); doc.setTextColor(...BRANDDI_DARK);
+  doc.text("Relatório de Brand Bidding", PW / 2, y, { align: "center" });
+  y += 8;
+  doc.setFont(F, "normal"); doc.setFontSize(11); doc.setTextColor(...BRANDDI_CYAN);
+  doc.text(data.period, PW / 2, y, { align: "center" });
+  y += 5;
+  doc.setFontSize(9); doc.setTextColor(...TEXT_GRAY);
+  doc.text(data.clientName, PW / 2, y, { align: "center" });
+  y += 10;
+  doc.setDrawColor(...BRANDDI_CYAN); doc.setLineWidth(0.5);
+  doc.line(20, y, PW - 20, y);
+  y += 8;
+  doc.setFont(F, "italic"); doc.setFontSize(8.5); doc.setTextColor(...TEXT_GRAY);
+  const introText = `Este documento apresenta a consolidação ${data.periodType.toLowerCase()} dos resultados e o status das ações de monitoramento e contenção de Brand Bidding, garantindo a proteção da sua marca nos canais de busca.`;
+  const introLines = doc.splitTextToSize(introText, PW - 28);
+  doc.text(introLines, 14, y);
+  y += introLines.length * 4.5 + 10;
+
+  // Seção 1 — Métricas
+  y = checkPage(doc, y, 50, PH, PW, data.clientName, data.period, hB64, wB64);
+  y = sectionTitle(doc, "1. Métricas Consolidadas", y, PW);
+  y = sectionDesc(doc, "A tabela a seguir resume os principais indicadores de Brand Bidding.", y, PW);
+  if (data.metricasIntro) y = analysisBlock(doc, data.metricasIntro, y, PW);
+
+  autoTable(doc, {
+    startY: y, margin: { left: 10, right: 10 },
+    head: [["Indicador", "Quantidade"]],
+    body: [
+      ["Agressores Identificados", String(data.identified)],
+      ["Agressores Inativos", String(data.inactive)],
+      ["Ocorrências", String(data.occurrences)],
+      ["Notificados", String(data.notified)],
+      ["Eliminados", String(data.eliminated)],
+      ["Notificações Enviadas", String(data.notificationsSent)],
+    ],
+    styles: { font: F, fontSize: 8.5, cellPadding: 3, textColor: TEXT_DARK },
+    headStyles: { fillColor: BRANDDI_DARK, textColor: WHITE, fontStyle: "bold", fontSize: 8.5 },
+    alternateRowStyles: { fillColor: LIGHT_BG },
+    columnStyles: { 1: { halign: "center", fontStyle: "bold" } },
+  });
+  // @ts-ignore
+  y = (doc as any).lastAutoTable.finalY + 6;
+
+  // Seção 2 — Agressores
+  y = checkPage(doc, y, 20, PH, PW, data.clientName, data.period, hB64, wB64);
+  y = sectionTitle(doc, "2. Agressores Identificados", y, PW);
+  y = sectionDesc(doc, `No período analisado (${data.periodDays} dias), foram identificados ${data.newAgressors} novos agressores e um total de ${data.totalAgressors} agressores ativos monitorados.`, y, PW);
+  if (data.agressoresAnalysis) { y = checkPage(doc, y, 18, PH, PW, data.clientName, data.period, hB64, wB64); y = analysisBlock(doc, data.agressoresAnalysis, y, PW); }
+  if (data.agressoresChartImage) { y = checkPage(doc, y, 72, PH, PW, data.clientName, data.period, hB64, wB64); y = chartImage(doc, data.agressoresChartImage, y, PW, 62); }
+
+  // Seção 3 — Heatmap
+  y = checkPage(doc, y, 20, PH, PW, data.clientName, data.period, hB64, wB64);
+  y = sectionTitle(doc, "3. Análise de Ofensores (Heatmap)", y, PW);
+  y = sectionDesc(doc, "Classificação dos principais ofensores por intensidade de atividade e impacto.", y, PW);
+  if (data.heatmapAnalysis) { y = checkPage(doc, y, 18, PH, PW, data.clientName, data.period, hB64, wB64); y = analysisBlock(doc, data.heatmapAnalysis, y, PW); }
+  if (data.heatmapChartImage) { y = checkPage(doc, y, 72, PH, PW, data.clientName, data.period, hB64, wB64); y = chartImage(doc, data.heatmapChartImage, y, PW, 62); }
+  if (data.topAgressores.length > 0) {
+    y = checkPage(doc, y, 30, PH, PW, data.clientName, data.period, hB64, wB64);
+    autoTable(doc, {
+      startY: y, margin: { left: 10, right: 10 },
+      head: [["Score", "Domínio"]],
+      body: data.topAgressores.map((a) => [String(a.score), a.domain]),
+      styles: { font: F, fontSize: 8, cellPadding: 2.5, textColor: TEXT_DARK },
+      headStyles: { fillColor: BRANDDI_DARK, textColor: WHITE, fontStyle: "bold" },
+      alternateRowStyles: { fillColor: LIGHT_BG },
+      columnStyles: { 0: { halign: "center", cellWidth: 20 } },
+    });
+    // @ts-ignore
+    y = (doc as any).lastAutoTable.finalY + 6;
+  }
+
+  // Seção 4 — Contenção
+  if (data.contencaoItems.length > 0) {
+    y = checkPage(doc, y, 20, PH, PW, data.clientName, data.period, hB64, wB64);
+    y = sectionTitle(doc, "4. Status das Ações de Contenção", y, PW);
+    y = sectionDesc(doc, "Detalhe do andamento das principais tratativas com agressores:", y, PW);
+    autoTable(doc, {
+      startY: y, margin: { left: 10, right: 10 },
+      head: [["Domínio", "Status"]],
+      body: data.contencaoItems.map((i) => [i.domain, i.status]),
+      styles: { font: F, fontSize: 8.5, cellPadding: 3, textColor: TEXT_DARK },
+      headStyles: { fillColor: BRANDDI_DARK, textColor: WHITE, fontStyle: "bold" },
+      alternateRowStyles: { fillColor: LIGHT_BG },
+    });
+    // @ts-ignore
+    y = (doc as any).lastAutoTable.finalY + 6;
+  }
+
+  // Seção 5 — Standby
+  if (data.standbyItems.length > 0) {
+    y = checkPage(doc, y, 20, PH, PW, data.clientName, data.period, hB64, wB64);
+    y = sectionTitle(doc, "5. Casos em Standby e em Notificação Extrajudicial", y, PW);
+    y = sectionDesc(doc, "Os seguintes casos estão em standby ou em processo de notificação extrajudicial, após esgotamento das tentativas de contato direto:", y, PW);
+    autoTable(doc, {
+      startY: y, margin: { left: 10, right: 10 },
+      head: [["Agressor", "Status", "Próxima Ação"]],
+      body: data.standbyItems.map((i) => [i.agressor, i.status, i.nextAction]),
+      styles: { font: F, fontSize: 8, cellPadding: 2.5, textColor: TEXT_DARK },
+      headStyles: { fillColor: BRANDDI_DARK, textColor: WHITE, fontStyle: "bold" },
+      alternateRowStyles: { fillColor: LIGHT_BG },
+    });
+    // @ts-ignore
+    y = (doc as any).lastAutoTable.finalY + 6;
+  }
+
+  // Seção 6 — Aprovação
+  if (data.aprovacaoText.trim()) {
+    y = checkPage(doc, y, 20, PH, PW, data.clientName, data.period, hB64, wB64);
+    y = sectionTitle(doc, "6. Agressores Aguardando Aprovação", y, PW);
+    y = sectionDesc(doc, "A lista abaixo inclui os agressores recém-identificados que aguardam aprovação para o início das tratativas.", y, PW);
+    for (const line of data.aprovacaoText.split("\n").map((l) => l.trim()).filter(Boolean)) {
+      y = checkPage(doc, y, 8, PH, PW, data.clientName, data.period, hB64, wB64);
+      doc.setFont(F, "normal"); doc.setFontSize(8.5); doc.setTextColor(...TEXT_DARK);
+      doc.text(`• ${line}`, 14, y); y += 5.5;
     }
-    window.addEventListener("paste", onPaste);
-    return () => window.removeEventListener("paste", onPaste);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isFocused]);
+    y += 3;
+  }
 
-  return (
-    <div className="space-y-3">
-      {/* ─── HEADER COM TOGGLE ─── */}
-      <div className="flex items-center justify-between">
-        <p className="text-xs font-medium text-white/50">{uploadLabel}</p>
-        {onToggle && (
-          <button
-            type="button"
-            onClick={onToggle}
-            className={cn(
-              "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-all",
-              enabled
-                ? "bg-cyan-500/20 border-cyan-400/40 text-cyan-300 hover:bg-cyan-500/30"
-                : "bg-white/5 border-white/10 text-white/25 hover:border-white/20"
-            )}
-            title={enabled ? "Desativar este gráfico" : "Ativar este gráfico"}
-          >
-            <div className={cn(
-              "w-1.5 h-1.5 rounded-full transition-all",
-              enabled ? "bg-cyan-400" : "bg-white/20"
-            )} />
-            {enabled ? "Incluir no PPT" : "Não incluir"}
-          </button>
-        )}
-      </div>
+  // Seção 7 — Resolvidos
+  if (data.resolvidosText.trim()) {
+    y = checkPage(doc, y, 20, PH, PW, data.clientName, data.period, hB64, wB64);
+    y = sectionTitle(doc, "7. Agressores Resolvidos (Sucesso)", y, PW);
+    y = sectionDesc(doc, "Os seguintes agressores tiveram suas atividades contidas com sucesso nos últimos dias:", y, PW);
+    for (const line of data.resolvidosText.split("\n").map((l) => l.trim()).filter(Boolean)) {
+      y = checkPage(doc, y, 8, PH, PW, data.clientName, data.period, hB64, wB64);
+      doc.setFont(F, "normal"); doc.setFontSize(8.5); doc.setTextColor(...TEXT_DARK);
+      doc.text(`• ${line}`, 14, y); y += 5.5;
+    }
+  }
 
-      {/* ─── CONTEÚDO (escondido se desativado) ─── */}
-      <div className={cn("transition-all", !enabled && "opacity-30 pointer-events-none select-none")}>
-
-      {/* ─── CONTAINER DE UPLOAD (imagem com borda ciano, centralizada) ─── */}
-      <div className="mb-3">
-        <div
-          ref={dropRef}
-          tabIndex={0}
-          onFocus={() => setIsFocused(true)}
-          onBlur={() => setIsFocused(false)}
-          onClick={() => {
-            setIsFocused(true);
-            if (!preview) inputRef.current?.click();
-          }}
-          onDrop={(e) => {
-            e.preventDefault();
-            handleFile(e.dataTransfer.files[0]);
-          }}
-          onDragOver={(e) => e.preventDefault()}
-          className={cn(
-            "relative rounded-xl border-2 transition-all overflow-hidden outline-none",
-            preview
-              ? "border-cyan-400/50 bg-[#0a2235] cursor-default"
-              : "border-dashed border-white/20 hover:border-cyan-400/50 hover:bg-cyan-500/5 cursor-pointer",
-            isFocused && !preview && "ring-2 ring-cyan-400/20 border-cyan-400/60 bg-cyan-500/5"
-          )}
-        >
-          <input
-            ref={inputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => handleFile(e.target.files?.[0])}
-          />
-
-          {preview ? (
-            <>
-              {/* Imagem centralizada com padding */}
-              <div className="flex items-center justify-center p-3 min-h-[180px] max-h-72">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={preview}
-                  alt={uploadLabel}
-                  className="max-w-full max-h-64 object-contain rounded-lg"
-                  style={{ display: "block", margin: "0 auto" }}
-                />
-              </div>
-
-              {/* Overlay de carregamento */}
-              {loading && (
-                <div className="absolute inset-0 bg-[#061520]/90 flex flex-col items-center justify-center gap-3 backdrop-blur-sm">
-                  <div className="relative">
-                    <div className="w-12 h-12 rounded-full border-2 border-cyan-400/30 border-t-cyan-400 animate-spin" />
-                    <Sparkles size={16} className="text-cyan-400 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
-                  </div>
-                  <p className="text-white text-sm font-medium">Gerando análise...</p>
-                  <p className="text-white/50 text-xs">Aguarde um momento</p>
-                </div>
-              )}
-
-              {!loading && (
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); onClear(); }}
-                  className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-red-500/80 transition-colors"
-                  title="Remover imagem"
-                >
-                  <X size={12} />
-                </button>
-              )}
-
-              {/* Badge de análise gerada */}
-              {!loading && options && (
-                <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-cyan-500/20 border border-cyan-400/30 rounded-full px-2 py-1">
-                  <Check size={10} className="text-cyan-400" />
-                  <span className="text-[10px] font-semibold text-cyan-300 uppercase tracking-wide">
-                    IA gerada
-                  </span>
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="flex flex-col items-center justify-center gap-2 py-8">
-              <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
-                <ImageIcon size={18} className="text-white/30" />
-              </div>
-              <p className="text-sm font-medium text-white/50">
-                Clique, arraste ou cole (Ctrl+V)
-              </p>
-              <p className="text-[11px] text-white/25 flex items-center gap-1">
-                <ClipboardCopy size={10} />
-                Cole um print da área de transferência
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ─── ANÁLISE EMBAIXO DO GRÁFICO (igual ao modelo) ─── */}
-      <div className="rounded-xl border border-white/10 bg-white/5 p-4">
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <Sparkles size={13} className="text-cyan-400" />
-            <p className="text-[11px] font-semibold text-cyan-300 uppercase tracking-wide">
-              Análise estratégica
-            </p>
-            {loading && (
-              <span className="inline-flex items-center gap-1.5 text-[11px] text-cyan-400 font-medium">
-                <Loader2 size={11} className="animate-spin" />
-                Gerando...
-              </span>
-            )}
-          </div>
-          {options && !loading && (
-            <button
-              type="button"
-              onClick={onRegenerate}
-              className="flex items-center gap-1.5 text-xs font-medium text-white/40 hover:text-cyan-300 transition-colors"
-            >
-              <RefreshCw size={11} />
-              Regenerar
-            </button>
-          )}
-        </div>
-
-        {/* Textarea da análise */}
-        <textarea
-          value={analysisText}
-          onChange={(e) => onEditAnalysis(e.target.value)}
-          rows={slot === "heatmap" ? 2 : 3}
-          placeholder={
-            preview
-              ? "A análise aparecerá aqui..."
-              : "Cole o gráfico acima para gerar análise com IA."
-          }
-          className="w-full rounded-lg border border-white/10 bg-white text-gray-900 placeholder:text-gray-400 px-3 py-2 text-sm leading-relaxed resize-none focus:outline-none focus:ring-2 focus:ring-cyan-400/20 focus:border-cyan-400/40"
-          disabled={loading}
-        />
-
-        {/* Picker das 2 opções */}
-        {options && !loading && (
-          <div className="mt-3">
-            <p className="text-[10px] font-semibold text-white/30 uppercase tracking-wide mb-2">
-              Trocar por outra opção da IA
-            </p>
-            <div className="grid grid-cols-1 gap-2">
-              {(["exemplo1", "exemplo2"] as const).map((key, idx) => {
-                const text = options[key];
-                const isSelected = analysisText.trim() === text.trim();
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => onSelectAnalysis(text)}
-                    className={cn(
-                      "text-left rounded-lg border p-2.5 transition-all text-xs leading-relaxed",
-                      isSelected
-                        ? "border-cyan-400/50 bg-cyan-500/10 ring-1 ring-cyan-400/20"
-                        : "border-white/10 bg-white/5 hover:border-cyan-400/30 hover:bg-cyan-500/5"
-                    )}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-400/70">
-                        Opção {idx + 1}
-                      </span>
-                      {isSelected && (
-                        <span className="text-[10px] font-semibold text-cyan-400 flex items-center gap-1">
-                          <Check size={10} /> Em uso
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-white/70">{text}</p>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
-
-      </div>
-    </div>
-  );
+  doc.save(`Relatorio_BB_${data.clientName.replace(/\s+/g, "_")}_${data.period.replace(/\s+/g, "_")}.pdf`);
 }
