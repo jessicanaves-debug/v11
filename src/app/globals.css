@@ -1,0 +1,55 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 30% 97%;
+    --foreground: 210 60% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 210 60% 12%;
+    --primary: 205 65% 17%;
+    --primary-foreground: 0 0% 100%;
+    --accent-emerald: 158 64% 42%;
+    --accent-emerald-foreground: 0 0% 100%;
+    --secondary: 220 14% 95%;
+    --secondary-foreground: 210 60% 12%;
+    --muted: 220 14% 95%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 220 14% 95%;
+    --accent-foreground: 210 60% 12%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 205 65% 17%;
+    --radius: 0.625rem;
+    --sidebar: 205 65% 12%;
+    --sidebar-foreground: 0 0% 100%;
+    --sidebar-active: 205 65% 17%;
+    --sidebar-hover: 205 50% 22%;
+    --sidebar-border: 205 40% 20%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+}
+
+@layer utilities {
+  .branddi-gradient {
+    background: linear-gradient(135deg, hsl(205 65% 17%) 0%, hsl(205 65% 12%) 100%);
+  }
+  .highlight-yellow {
+    background-color: #fff3a8;
+    padding: 0 4px;
+    border-radius: 2px;
+  }
+}
